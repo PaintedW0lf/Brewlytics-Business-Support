@@ -123,32 +123,32 @@ def run_monte_carlo(
     lost_customers = [r['customers_lost'] for r in results]
     
     return {
-        'num_simulations': num_simulations,
+        'num_simulations': int(num_simulations),
         'revenue': {
-            'mean': np.mean(revenues),
-            'min': np.min(revenues),
-            'max': np.max(revenues),
-            'p10': np.percentile(revenues, 10),
-            'p50': np.percentile(revenues, 50),
-            'p90': np.percentile(revenues, 90),
+            'mean': float(np.mean(revenues)),
+            'min': float(np.min(revenues)),
+            'max': float(np.max(revenues)),
+            'p10': float(np.percentile(revenues, 10)),
+            'p50': float(np.percentile(revenues, 50)),
+            'p90': float(np.percentile(revenues, 90)),
         },
         'profit': {
-            'mean': np.mean(profits),
-            'min': np.min(profits),
-            'max': np.max(profits),
-            'p10': np.percentile(profits, 10),
-            'p50': np.percentile(profits, 50),
-            'p90': np.percentile(profits, 90),
-            'positive_probability': sum(1 for p in profits if p > 0) / len(profits) * 100
+            'mean': float(np.mean(profits)),
+            'min': float(np.min(profits)),
+            'max': float(np.max(profits)),
+            'p10': float(np.percentile(profits, 10)),
+            'p50': float(np.percentile(profits, 50)),
+            'p90': float(np.percentile(profits, 90)),
+            'positive_probability': float(sum(1 for p in profits if p > 0) / len(profits) * 100)
         },
         'wait_time': {
-            'mean': np.mean(wait_times),
-            'max': np.max(wait_times),
+            'mean': float(np.mean(wait_times)),
+            'max': float(np.max(wait_times)),
         },
         'customer_loss': {
-            'mean': np.mean(lost_customers),
-            'max': np.max(lost_customers),
-            'loss_probability': sum(1 for l in lost_customers if l > 5) / len(lost_customers) * 100
+            'mean': float(np.mean(lost_customers)),
+            'max': float(np.max(lost_customers)),
+            'loss_probability': float(sum(1 for l in lost_customers if l > 5) / len(lost_customers) * 100)
         },
         # For histogram/distribution chart
         'distribution': {
@@ -184,20 +184,20 @@ def compare_scenarios(
     )
     
     # Calculate improvement metrics
-    profit_improvement = proposed['profit']['mean'] - current['profit']['mean']
-    revenue_improvement = proposed['revenue']['mean'] - current['revenue']['mean']
-    wait_time_change = proposed['wait_time']['mean'] - current['wait_time']['mean']
+    profit_improvement = float(proposed['profit']['mean'] - current['profit']['mean'])
+    revenue_improvement = float(proposed['revenue']['mean'] - current['revenue']['mean'])
+    wait_time_change = float(proposed['wait_time']['mean'] - current['wait_time']['mean'])
     
     return {
         'current': current,
         'proposed': proposed,
         'comparison': {
             'profit_change': profit_improvement,
-            'profit_change_percent': (profit_improvement / abs(current['profit']['mean'])) * 100 if current['profit']['mean'] != 0 else 0,
+            'profit_change_percent': float((profit_improvement / abs(current['profit']['mean'])) * 100) if current['profit']['mean'] != 0 else 0.0,
             'revenue_change': revenue_improvement,
             'wait_time_change': wait_time_change,
             'recommendation': 'RECOMMENDED' if profit_improvement > 0 else 'NOT RECOMMENDED',
-            'confidence': proposed['profit']['positive_probability']
+            'confidence': float(proposed['profit']['positive_probability'])
         }
     }
 
