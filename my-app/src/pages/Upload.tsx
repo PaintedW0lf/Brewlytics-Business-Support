@@ -13,7 +13,7 @@ export default function Upload() {
   const [loading, setLoading] = useState(false)
   const [progress, setProgress] = useState(0)
 
-  const fakeProcess = useCallback((name: string) => {
+  const uploadProcess = useCallback((name: string) => {
     setFileName(name); setLoading(true); setProgress(0)
     const steps = [20, 45, 65, 82, 100]
     steps.forEach((v, i) =>
@@ -24,7 +24,7 @@ export default function Upload() {
     )
   }, [])
 
-  const handleFile = (file: File) => { if (file.name.endsWith('.csv')) fakeProcess(file.name) }
+  const handleFile = (file: File) => { if (file.name.endsWith('.csv')) uploadProcess(file.name) }
   const onDrop = (e: React.DragEvent) => { e.preventDefault(); setDragging(false); const f = e.dataTransfer.files?.[0]; if (f) handleFile(f) }
 
   return (
