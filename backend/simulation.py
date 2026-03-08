@@ -1,209 +1,239 @@
-"""
-SimPy-based Coffee Shop Simulation Engine
-This is the "Digital Twin" of a small business
-"""
-import simpy
-import random
 import numpy as np
-from dataclasses import dataclass
-from typing import List, Dict
+import pandas as pd
+from dataclasses import dataclass, field
+from typing import Optional
+from distributions import CustomerRV, ArrivalRateRV, WaitingTimeRV, PurchaseRV
+
 
 @dataclass
-class SimulationResult:
-    revenue: float
-    avg_wait_time: float
-    customers_served: int
-    customers_lost: int  # Left due to long wait
-    total_customers: int
+class CafeConfig:
+    products: list = field(default_factory=list)
+    special_multiplier: float = 1.0
+    n_staff: int = 3
+    staff_hourly_wage: float = 15.0
+    hours_open: float = 12.0
+    open_hour: float = 7.0
+    day_of_week: str = "weekday"
+    daily_fixed_cost: float = 200.0
 
-def coffee_shop_customer(env, customer_id, baristas, stats, price, patience_minutes=10):
-    """Simulate a single customer's journey through the coffee shop."""
-    arrival_time = env.now
-    stats['total_customers'] += 1
-    
-    with baristas.request() as request:
-        # Customer waits, but has limited patience
-        result = yield request | env.timeout(patience_minutes)
-        
-        if request in result:
-            # Customer got served
-            wait_time = env.now - arrival_time
-            stats['wait_times'].append(wait_time)
-            
-            # Service takes 2-5 minutes
-            service_time = random.uniform(2, 5)
-            yield env.timeout(service_time)
-            
-            stats['revenue'] += price
-            stats['customers_served'] += 1
-        else:
-            # Customer left (reneged) due to long wait
-            stats['customers_lost'] += 1
+    @property
+    def close_hour(self) -> float:
+        return self.open_hour + self.hours_open
 
-def customer_generator(env, baristas, stats, arrival_rate, price):
-    """Generate customers with Poisson arrival pattern."""
-    customer_id = 0
-    while True:
-        # Poisson process: time between arrivals follows exponential distribution
-        yield env.timeout(random.expovariate(arrival_rate))
-        customer_id += 1
-        env.process(coffee_shop_customer(env, customer_id, baristas, stats, price))
+    @property
+    def daily_staff_cost(self) -> float:
+        return self.n_staff * self.staff_hourly_wage * self.hours_open
 
-def run_single_day(
-    num_staff: int = 2,
-    price: float = 5.00,
-    base_customers_per_hour: float = 15,
-    demand_std_dev: float = 3.0,
-    shift_hours: int = 8
-) -> SimulationResult:
-    """Run a single day simulation."""
-    env = simpy.Environment()
-    baristas = simpy.Resource(env, capacity=num_staff)
-    
-    stats = {
-        'wait_times': [],
-        'revenue': 0,
-        'customers_served': 0,
-        'customers_lost': 0,
-        'total_customers': 0
-    }
-    
-    todays_customers_per_hour = max(1.0, random.gauss(base_customers_per_hour, demand_std_dev))
-    arrival_rate = todays_customers_per_hour / 60
-    
-    env.process(customer_generator(env, baristas, stats, arrival_rate, price))
-    env.run(until=shift_hours * 60)
-    
-    avg_wait = np.mean(stats['wait_times']) if stats['wait_times'] else 0
-    
-    return SimulationResult(
-        revenue=stats['revenue'],
-        avg_wait_time=avg_wait,
-        customers_served=stats['customers_served'],
-        customers_lost=stats['customers_lost'],
-        total_customers=stats['total_customers']
+    @property
+    def total_daily_fixed(self) -> float:
+        return self.daily_fixed_cost + self.daily_staff_cost
+
+    @property
+    def avg_discount(self) -> float:
+        if not self.products:
+            return 0.0
+        return np.mean([p.get("discount", 0) for p in self.products])
+
+    @property
+    def day_multiplier(self) -> float:
+        return {"weekday": 1.0, "weekend": 1.25, "monday": 0.75}.get(
+            self.day_of_week, 1.0
+        ) * self.special_multiplier
+
+
+@dataclass
+class DayResult:
+    revenue: float = 0.0
+    cogs: float = 0.0
+    gross_profit: float = 0.0
+    net_profit: float = 0.0
+    n_customers_arrived: int = 0
+    n_customers_served: int = 0
+    n_customers_abandoned: int = 0
+    avg_waiting_time: float = 0.0
+    max_waiting_time: float = 0.0
+    avg_transaction_value: float = 0.0
+    items_sold: dict = field(default_factory=dict)
+    utilization: float = 0.0
+
+
+def simulate_day(config: CafeConfig, seed: Optional[int] = None) -> DayResult:
+    rng = np.random.default_rng(seed)
+
+    customer_rv = CustomerRV(rng=rng)
+    arrival_rv  = ArrivalRateRV(rng=rng)
+    waiting_rv  = WaitingTimeRV(n_staff=config.n_staff, rng=rng)
+    purchase_rv = PurchaseRV(products=config.products, rng=rng)
+
+    arrivals = arrival_rv.arrival_times(
+        open_hour=config.open_hour,
+        close_hour=config.close_hour,
+        avg_discount=config.avg_discount,
+        day_multiplier=config.day_multiplier,
     )
+    n_arrived = len(arrivals)
 
-def run_monte_carlo(
-    num_simulations: int = 500,
-    num_staff: int = 2,
-    price: float = 5.00,
-    base_customers_per_hour: float = 15,
-    demand_std_dev: float = 3.0,
-    shift_hours: int = 8,
-    staff_cost_per_day: float = 150
-) -> Dict:
-    """Run Monte Carlo simulation across multiple days."""
-    results = []
-    
-    for _ in range(num_simulations):
-        day_result = run_single_day(
-            num_staff=num_staff,
-            price=price,
-            base_customers_per_hour=base_customers_per_hour,
-            demand_std_dev=demand_std_dev,
-            shift_hours=shift_hours
+    if n_arrived == 0:
+        return DayResult()
+
+    # Proper discrete-event queue: track when each server becomes free
+    server_free_at = np.full(config.n_staff, config.open_hour, dtype=float)
+
+    result = DayResult()
+    result.n_customers_arrived = n_arrived
+
+    waiting_times_served = []
+    items_sold = {p["name"]: 0 for p in config.products}
+    total_busy_time = 0.0
+
+    customers    = customer_rv.sample(n_arrived, time_of_day=config.open_hour + config.hours_open / 2)
+    patience_arr = waiting_rv.customer_patience(n_arrived)
+
+    for idx in range(n_arrived):
+        arrival_t = arrivals[idx]
+        cust      = {k: customers[k][idx] for k in customers}
+        patience  = patience_arr[idx]
+
+        next_free_server = np.argmin(server_free_at)
+        server_ready_t   = server_free_at[next_free_server]
+
+        wait_min = max(0.0, server_ready_t - arrival_t) * 60.0
+
+        if wait_min > patience:
+            result.n_customers_abandoned += 1
+            continue
+
+        purchase_vec = purchase_rv.purchase(cust, wait_min, patience)
+
+        if purchase_vec.sum() == 0:
+            result.n_customers_abandoned += 1
+            continue
+
+        ordered_items = []
+        for i, cnt in enumerate(purchase_vec):
+            ordered_items.extend([config.products[i]["time_to_make"]] * cnt)
+
+        service_time_min = waiting_rv.service_time(ordered_items)
+        service_time_hrs = service_time_min / 60.0
+
+        start_service_t = max(arrival_t, server_ready_t)
+        server_free_at[next_free_server] = start_service_t + service_time_hrs
+        total_busy_time += service_time_hrs
+
+        revenue = sum(
+            purchase_vec[i] * config.products[i]["price"] * (1 - config.products[i].get("discount", 0))
+            for i in range(len(config.products))
         )
-        
-        total_staff_cost = num_staff * staff_cost_per_day
-        profit = day_result.revenue - total_staff_cost
-        
-        results.append({
-            'revenue': day_result.revenue,
-            'profit': profit,
-            'avg_wait_time': day_result.avg_wait_time,
-            'customers_served': day_result.customers_served,
-            'customers_lost': day_result.customers_lost,
-            'total_customers': day_result.total_customers
-        })
-    
-    revenues = [r['revenue'] for r in results]
-    profits = [r['profit'] for r in results]
-    wait_times = [r['avg_wait_time'] for r in results]
-    lost_customers = [r['customers_lost'] for r in results]
-    
+        cogs = sum(
+            purchase_vec[i] * config.products[i]["cost"]
+            for i in range(len(config.products))
+        )
+
+        result.revenue += revenue
+        result.cogs    += cogs
+        result.n_customers_served += 1
+        waiting_times_served.append(wait_min)
+
+        for i, cnt in enumerate(purchase_vec):
+            if cnt > 0:
+                items_sold[config.products[i]["name"]] += int(cnt)
+
+    result.gross_profit = result.revenue - result.cogs
+    result.net_profit   = result.gross_profit - config.total_daily_fixed
+    result.items_sold   = items_sold
+
+    if waiting_times_served:
+        result.avg_waiting_time = float(np.mean(waiting_times_served))
+        result.max_waiting_time = float(np.max(waiting_times_served))
+
+    if result.n_customers_served > 0:
+        result.avg_transaction_value = result.revenue / result.n_customers_served
+
+    available_server_hours = config.n_staff * config.hours_open
+    result.utilization = min(1.0, total_busy_time / available_server_hours)
+
+    return result
+
+
+def _summarise(arr: np.ndarray) -> dict:
     return {
-        'num_simulations': int(num_simulations),
-        'revenue': {
-            'mean': float(np.mean(revenues)),
-            'min': float(np.min(revenues)),
-            'max': float(np.max(revenues)),
-            'p10': float(np.percentile(revenues, 10)),
-            'p50': float(np.percentile(revenues, 50)),
-            'p90': float(np.percentile(revenues, 90)),
-        },
-        'profit': {
-            'mean': float(np.mean(profits)),
-            'min': float(np.min(profits)),
-            'max': float(np.max(profits)),
-            'p10': float(np.percentile(profits, 10)),
-            'p50': float(np.percentile(profits, 50)),
-            'p90': float(np.percentile(profits, 90)),
-            'positive_probability': float(sum(1 for p in profits if p > 0) / len(profits) * 100)
-        },
-        'wait_time': {
-            'mean': float(np.mean(wait_times)),
-            'max': float(np.max(wait_times)),
-        },
-        'customer_loss': {
-            'mean': float(np.mean(lost_customers)),
-            'max': float(np.max(lost_customers)),
-            'loss_probability': float(sum(1 for l in lost_customers if l > 5) / len(lost_customers) * 100)
-        },
-        # For histogram/distribution chart
-        'distribution': {
-            'profits': [float(p) for p in np.percentile(profits, range(0, 101, 5))],
-            'revenues': [float(r) for r in np.percentile(revenues, range(0, 101, 5))]
-        }
+        "mean":   float(np.mean(arr)),
+        "median": float(np.median(arr)),
+        "std":    float(np.std(arr)),
+        "p5":     float(np.percentile(arr, 5)),
+        "p25":    float(np.percentile(arr, 25)),
+        "p75":    float(np.percentile(arr, 75)),
+        "p95":    float(np.percentile(arr, 95)),
     }
+
+
+def run_simulation(config: CafeConfig, n_simulations: int = 200, base_seed: int = 42) -> dict:
+    """Run n_simulations days and return aggregated statistics dict."""
+    results = [simulate_day(config, seed=base_seed + i) for i in range(n_simulations)]
+
+    rows = []
+    for r in results:
+        row = {
+            "revenue":               r.revenue,
+            "cogs":                  r.cogs,
+            "gross_profit":          r.gross_profit,
+            "net_profit":            r.net_profit,
+            "n_customers_arrived":   r.n_customers_arrived,
+            "n_customers_served":    r.n_customers_served,
+            "n_customers_abandoned": r.n_customers_abandoned,
+            "avg_waiting_time":      r.avg_waiting_time,
+            "max_waiting_time":      r.max_waiting_time,
+            "avg_transaction_value": r.avg_transaction_value,
+            "utilization":           r.utilization,
+        }
+        for prod_name, cnt in r.items_sold.items():
+            row[f"sold_{prod_name}"] = cnt
+        rows.append(row)
+
+    df = pd.DataFrame(rows)
+    item_cols = [c for c in df.columns if c.startswith("sold_")]
+
+    return {
+        "n_simulations":        n_simulations,
+        "revenue":              _summarise(df["revenue"].values),
+        "net_profit":           _summarise(df["net_profit"].values),
+        "gross_profit":         _summarise(df["gross_profit"].values),
+        "avg_waiting_time":     _summarise(df["avg_waiting_time"].values),
+        "max_waiting_time":     _summarise(df["max_waiting_time"].values),
+        "customers_served":     _summarise(df["n_customers_served"].values),
+        "customers_abandoned":  _summarise(df["n_customers_abandoned"].values),
+        "utilization":          _summarise(df["utilization"].values),
+        "avg_transaction":      _summarise(df["avg_transaction_value"].values),
+        "gross_margin_pct":     100 * df["gross_profit"].mean() / max(df["revenue"].mean(), 1),
+        "abandonment_rate_pct": 100 * df["n_customers_abandoned"].mean() /
+                                max(df["n_customers_served"].mean() + df["n_customers_abandoned"].mean(), 1),
+        "product_sales": {
+            c.replace("sold_", ""): {
+                "mean_daily_sales": float(df[c].mean()),
+                "total_sales":      int(df[c].sum()),
+            }
+            for c in item_cols
+        },
+    }
+
 
 def compare_scenarios(
-    current_staff: int,
-    current_price: float,
-    new_staff: int,
-    new_price: float,
-    base_customers_per_hour: float = 15,
-    demand_std_dev: float = 3.0,
-    current_shift_hours: int = 8,
-    new_shift_hours: int = 8,
-    num_simulations: int = 500
-) -> Dict:
-    """
-    The KILLER feature: Compare current vs proposed scenario.
-    This is what makes the demo "wow" the judges.
-    """
-    current = run_monte_carlo(
-        num_simulations=num_simulations,
-        num_staff=current_staff,
-        price=current_price,
-        base_customers_per_hour=base_customers_per_hour,
-        demand_std_dev=demand_std_dev,
-        shift_hours=current_shift_hours
-    )
-    
-    proposed = run_monte_carlo(
-        num_simulations=num_simulations,
-        num_staff=new_staff,
-        price=new_price,
-        base_customers_per_hour=base_customers_per_hour,
-        demand_std_dev=demand_std_dev,
-        shift_hours=new_shift_hours
-    )
-    
-    # Calculate improvement metrics
-    profit_improvement = float(proposed['profit']['mean'] - current['profit']['mean'])
-    revenue_improvement = float(proposed['revenue']['mean'] - current['revenue']['mean'])
-    wait_time_change = float(proposed['wait_time']['mean'] - current['wait_time']['mean'])
-    
-    return {
-        'current': current,
-        'proposed': proposed,
-        'comparison': {
-            'profit_change': float(profit_improvement),
-            'profit_change_percent': float((profit_improvement / abs(current['profit']['mean'])) * 100) if current['profit']['mean'] != 0 else 0.0,
-            'revenue_change': float(revenue_improvement),
-            'wait_time_change': float(wait_time_change),
-            'recommendation': 'RECOMMENDED' if profit_improvement > 0 else 'NOT RECOMMENDED',
-            'confidence': float(proposed['profit']['positive_probability'])
-        }
-    }
+    base_config: CafeConfig,
+    scenarios: dict,
+    n_simulations: int = 200,
+    base_seed: int = 42,
+) -> dict:
+    results = {"baseline": run_simulation(base_config, n_simulations, base_seed)}
+    for name, cfg in scenarios.items():
+        results[name] = run_simulation(cfg, n_simulations, base_seed)
+
+    baseline_profit = results["baseline"]["net_profit"]["mean"]
+    baseline_wait   = results["baseline"]["avg_waiting_time"]["mean"]
+    for name, res in results.items():
+        res["delta_net_profit_pct"] = (
+            (res["net_profit"]["mean"] - baseline_profit) / abs(baseline_profit) * 100
+            if baseline_profit != 0 else 0.0
+        )
+        res["delta_avg_wait_min"] = res["avg_waiting_time"]["mean"] - baseline_wait
+
+    return results

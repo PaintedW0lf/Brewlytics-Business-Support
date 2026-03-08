@@ -1,437 +1,518 @@
-import { useState, useCallback, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
-import {
-  type BusinessState,
-  type ChatResponse,
-  type SimulateResponse,
-  type CSVUploadResponse,
-  runSimulation,
-  sendChat,
-  uploadCSV,
-} from '../api'
+import { useState, useCallback } from 'react'
+import { parseHypothesisWithGPT, runCompare, type ScenarioRequest, type CompareResponse } from '../api'
+import { CoffeeCup, MatchaLatte, theme } from '../components/Illustrations'
 
-function Simulator() {
-  const navigate = useNavigate()
+const PRODUCTS = [
+  { name: 'Espresso',          price: 3.00, emoji: '☕', category: 'hot-caf' },
+  { name: 'Americano',         price: 3.50, emoji: '☕', category: 'hot-caf' },
+  { name: 'Flat White',        price: 4.00, emoji: '☕', category: 'hot-caf' },
+  { name: 'Cappuccino',        price: 4.25, emoji: '☕', category: 'hot-caf' },
+  { name: 'Latte',             price: 4.50, emoji: '☕', category: 'hot-caf' },
+  { name: 'Oat Milk Latte',    price: 5.50, emoji: '🌿', category: 'hot-caf' },
+  { name: 'Mocha',             price: 4.75, emoji: '🍫', category: 'hot-caf' },
+  { name: 'Iced Latte',        price: 5.00, emoji: '🧊', category: 'cold-caf' },
+  { name: 'Cold Brew',         price: 5.50, emoji: '🧊', category: 'cold-caf' },
+  { name: 'Iced Matcha Latte', price: 5.75, emoji: '🍵', category: 'cold-caf' },
+  { name: 'Hot Chocolate',     price: 4.00, emoji: '🍫', category: 'hot-decaf' },
+  { name: 'Chai Latte',        price: 4.50, emoji: '🌿', category: 'hot-decaf' },
+  { name: 'Herbal Tea',        price: 3.00, emoji: '🍃', category: 'hot-decaf' },
+  { name: 'Fresh OJ',          price: 4.50, emoji: '🍊', category: 'cold-decaf' },
+  { name: 'Smoothie',          price: 6.00, emoji: '🥤', category: 'cold-decaf' },
+  { name: 'Croissant',         price: 3.50, emoji: '🥐', category: 'food' },
+  { name: 'Avocado Toast',     price: 9.00, emoji: '🥑', category: 'food' },
+  { name: 'Banana Bread',      price: 4.00, emoji: '🍌', category: 'food' },
+]
 
-  // Step 1 = CSV upload gate, Step 2 = full simulator
-  const [step, setStep] = useState<'upload' | 'simulate'>('upload')
+const CATEGORIES = [
+  { id: 'all',        label: 'All Items' },
+  { id: 'hot-caf',   label: '☕ Hot' },
+  { id: 'cold-caf',  label: '🧊 Cold' },
+  { id: 'hot-decaf', label: '🍵 Herbal' },
+  { id: 'cold-decaf',label: '🍊 Juice' },
+  { id: 'food',      label: '🥐 Food' },
+]
 
-  // Business state (filled from CSV or defaults)
-  const [price, setPrice] = useState(5.0)
-  const [staff, setStaff] = useState(2)
-  const [customersPerHour, setCustomersPerHour] = useState(15)
-  const [demandStdDev, setDemandStdDev] = useState(3.0)
-  const [operatingHours, setOperatingHours] = useState(8.0)
-  const [businessName, setBusinessName] = useState('My Business')
+const QUICK_CHIPS = [
+  { emoji: '👥', text: 'Hire 2 more staff' },
+  { emoji: '🏷️', text: '20% discount on cold drinks' },
+  { emoji: '📈', text: 'Raise all prices 15%' },
+  { emoji: '🎉', text: 'Special event 5x traffic' },
+  { emoji: '🌅', text: 'Open 2 hours earlier at 5am' },
+  { emoji: '✂️', text: 'Remove food items from menu' },
+  { emoji: '⭐', text: 'Oat Milk Latte goes viral' },
+  { emoji: '📉', text: 'Cut staff to 2 to save costs' },
+]
 
-  // Proposed changes
-  const [newPrice, setNewPrice] = useState(5.5)
-  const [newStaff, setNewStaff] = useState(3)
-  const [newOperatingHours, setNewOperatingHours] = useState(8.0)
+const DAY_OPTS = [
+  { val: 'weekday', label: '💼 Weekday', color: theme.brownLight },
+  { val: 'monday',  label: '😩 Monday',  color: theme.rose },
+  { val: 'friday',  label: '🎉 Friday',  color: theme.gold },
+  { val: 'weekend', label: '☀️ Weekend', color: theme.matcha },
+]
 
-  // CSV upload state
-  const fileInputRef = useRef<HTMLInputElement>(null)
-  const [csvResult, setCsvResult] = useState<CSVUploadResponse | null>(null)
-  const [csvError, setCsvError] = useState<string | null>(null)
-  const [csvLoading, setCsvLoading] = useState(false)
+interface ItemOverride { newPrice: number; discount: number; removed: boolean }
+type ItemOverrides = Record<string, ItemOverride>
 
-  // AI Chat
-  const [chatInput, setChatInput] = useState('')
-  const [chatMessages, setChatMessages] = useState<
-    { role: 'user' | 'ai'; text: string }[]
-  >([])
+interface Form {
+  n_staff: number; open_hour: number; close_hour: number
+  day_of_week: string; special_multiplier: number
+  price_change_factor: number; apply_discount_to_all: number
+  apply_discount_to_cold: number; n_simulations: number
+}
 
-  // Simulation loading
-  const [loading, setLoading] = useState(false)
-  const [progress, setProgress] = useState(0)
-  const [error, setError] = useState<string | null>(null)
+const DEF: Form = {
+  n_staff: 3, open_hour: 7, close_hour: 19, day_of_week: 'weekday',
+  special_multiplier: 1, price_change_factor: 1,
+  apply_discount_to_all: 0, apply_discount_to_cold: 0, n_simulations: 200,
+}
 
-  const businessState: BusinessState = {
-    name: businessName,
-    price,
-    staff_count: staff,
-    customers_per_hour: customersPerHour,
-    demand_std_dev: demandStdDev,
-    operating_hours: operatingHours,
-    staff_cost_per_day: staff * 150,
-  }
-
-  // ── CSV upload handler ────────────────────────────────────────────────────
-  const handleCSVUpload = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0]
-    if (!file) return
-    setCsvLoading(true)
-    setCsvError(null)
-    setCsvResult(null)
-    try {
-      const result = await uploadCSV(file)
-      setCsvResult(result)
-      // Pre-fill parameters from CSV
-      setPrice(result.avg_price)
-      setNewPrice(Math.round((result.avg_price * 1.1) * 100) / 100)
-      setCustomersPerHour(result.customers_per_hour)
-      setDemandStdDev(result.customers_std_dev ?? 3.0)
-      setOperatingHours(result.avg_operating_hours ?? 8.0)
-      setNewOperatingHours(result.avg_operating_hours ?? 8.0)
-      setStaff(result.staff_count)
-      setNewStaff(result.staff_count)
-      if (result.business_name) setBusinessName(result.business_name)
-    } catch (err: unknown) {
-      setCsvError(err instanceof Error ? err.message : 'Failed to parse CSV.')
-    } finally {
-      setCsvLoading(false)
-      if (fileInputRef.current) fileInputRef.current.value = ''
-    }
-  }, [])
-
-  // ── Simulation helpers ────────────────────────────────────────────────────
-  const simulateProgress = () => {
-    setProgress(0)
-    const steps = [10, 25, 40, 55, 70, 82, 90, 95]
-    steps.forEach((val, i) => setTimeout(() => setProgress(val), (i + 1) * 200))
-  }
-
-  const handleRunSimulation = useCallback(async () => {
-    setLoading(true); setError(null); simulateProgress()
-    try {
-      const result: SimulateResponse = await runSimulation({
-        current: businessState,
-        new_price: newPrice,
-        new_staff: newStaff,
-        new_operating_hours: newOperatingHours,
-        num_simulations: 500,
-      })
-      setProgress(100)
-      setTimeout(() => {
-        sessionStorage.setItem('simResults', JSON.stringify(result))
-        navigate('/results')
-      }, 400)
-    } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : 'Failed to connect to backend. Is it running on localhost:8000?')
-      setLoading(false); setProgress(0)
-    }
-  }, [businessState, newPrice, newStaff, navigate])
-
-  const handleChat = useCallback(async () => {
-    if (!chatInput.trim()) return
-    const userMsg = chatInput.trim()
-    setChatMessages((prev) => [...prev, { role: 'user', text: userMsg }])
-    setChatInput(''); setLoading(true); setError(null); simulateProgress()
-    try {
-      const result: ChatResponse = await sendChat({ message: userMsg, business_state: businessState })
-      setProgress(100)
-      if (result.proposed_changes.price > 0) setNewPrice(Math.round(result.proposed_changes.price * 100) / 100)
-      if (result.proposed_changes.staff > 0) setNewStaff(result.proposed_changes.staff)
-      setChatMessages((prev) => [...prev, { role: 'ai', text: result.insight }])
-      sessionStorage.setItem('simResults', JSON.stringify({
-        success: true,
-        business_name: businessState.name,
-        current_state: { price, staff },
-        proposed_state: { price: result.proposed_changes.price, staff: result.proposed_changes.staff },
-        results: result.simulation_results,
-      }))
-      setLoading(false); setProgress(0)
-    } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : 'Failed to connect to backend.')
-      setChatMessages((prev) => [...prev, { role: 'ai', text: '❌ Could not reach the simulation backend. Make sure it is running.' }])
-      setLoading(false); setProgress(0)
-    }
-  }, [chatInput, businessState, price, staff])
-
-  // ── STEP 1: CSV Upload Gate ───────────────────────────────────────────────
-  if (step === 'upload') {
-    return (
-      <main className="min-h-screen bg-linear-to-br from-slate-900 via-slate-800 to-slate-900 flex items-center justify-center px-4 py-12">
-        <div className="mx-auto max-w-2xl w-full">
-          <button onClick={() => navigate('/')} className="text-slate-400 hover:text-white text-sm mb-8 block transition">
-            ← Back
-          </button>
-
-          <h1 className="text-3xl font-bold text-white mb-2">Upload Your Sales Data</h1>
-          <p className="text-slate-400 mb-8">
-            We'll read your CSV and automatically set the simulation parameters based on your real business data.
-          </p>
-
-          {/* Drop zone */}
-          <label
-            htmlFor="csv-upload-gate"
-            className="group flex flex-col items-center justify-center gap-4 rounded-2xl border-2 border-dashed border-slate-600 hover:border-blue-500 bg-slate-800/50 hover:bg-slate-800 transition cursor-pointer p-12"
-          >
-            <div className="text-5xl">{csvLoading ? '⏳' : '📂'}</div>
-            <div className="text-center">
-              <p className="text-white font-semibold text-lg">
-                {csvLoading ? 'Parsing your data...' : 'Drop your CSV here, or click to browse'}
-              </p>
-              <p className="text-slate-500 text-sm mt-1">
-                Columns like <code className="bg-slate-700 px-1 rounded">avg_item_price</code>,{' '}
-                <code className="bg-slate-700 px-1 rounded">customers_served</code>,{' '}
-                <code className="bg-slate-700 px-1 rounded">staff_on_shift</code> are auto-detected
-              </p>
-            </div>
-            <input
-              ref={fileInputRef}
-              id="csv-upload-gate"
-              type="file"
-              accept=".csv"
-              onChange={handleCSVUpload}
-              className="hidden"
-            />
-          </label>
-
-          {csvError && (
-            <p className="mt-4 text-red-400 text-sm bg-red-400/10 rounded-xl p-3">✗ CSV failed to upload. Please check your file and try again.</p>
-          )}
-
-          {csvResult && (
-            <div className="mt-6 rounded-2xl border border-green-500/30 bg-green-500/5 px-6 py-4">
-              <p className="text-green-400 font-semibold">✓ CSV successfully uploaded</p>
-            </div>
-          )}
-
-          {/* Action buttons */}
-          <div className="mt-6 flex flex-col sm:flex-row gap-3">
-            <button
-              onClick={() => setStep('simulate')}
-              disabled={csvLoading || !csvResult}
-              className="flex-1 rounded-xl bg-blue-600 hover:bg-blue-500 disabled:bg-slate-600 px-6 py-3 text-white font-semibold transition cursor-pointer disabled:cursor-not-allowed"
-            >
-              Start Simulation with This Data →
-            </button>
-            <a
-              href="http://localhost:8000/download-sample/pandosy_pastries_sample.csv"
-              download="pandosy_pastries_sample.csv"
-              className="flex items-center justify-center gap-2 rounded-xl border border-slate-600 bg-slate-800 hover:bg-slate-700 px-5 py-3 text-slate-300 hover:text-white text-sm font-medium transition"
-            >
-              ⬇ Download Sample CSV
-            </a>
-          </div>
-
-        </div>
-      </main>
-    )
-  }
-
-  // ── STEP 2: Full Simulator ────────────────────────────────────────────────
+function KawaiiSlider({ label, emoji, value, min, max, step, format, onChange, accentColor }: {
+  label: string; emoji: string; value: number; min: number; max: number; step: number
+  format: (v: number) => string; onChange: (v: number) => void; accentColor?: string
+}) {
+  const pct = ((value - min) / (max - min)) * 100
+  const color = accentColor ?? theme.brown
   return (
-    <main className="min-h-screen bg-linear-to-br from-slate-900 via-slate-800 to-slate-900 px-4 py-8">
-      <div className="mx-auto max-w-6xl">
-        {/* Header */}
-        <div className="flex items-center justify-between mb-8">
+    <div style={{ marginBottom: 20 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+        <span style={{ fontWeight: 700, color: theme.text, fontSize: '0.9rem' }}>{emoji} {label}</span>
+        <span style={{ background: color + '22', color, borderRadius: 20, padding: '3px 12px', fontSize: '0.82rem', fontWeight: 800, border: `1.5px solid ${color}44` }}>
+          {format(value)}
+        </span>
+      </div>
+      <div style={{ position: 'relative', height: 8, borderRadius: 8, background: theme.creamDark }}>
+        <div style={{ position: 'absolute', left: 0, top: 0, height: '100%', borderRadius: 8, background: `linear-gradient(90deg, ${color}99, ${color})`, width: `${pct}%`, transition: 'width 0.15s' }} />
+        <input type="range" min={min} max={max} step={step} value={value}
+          onChange={e => onChange(parseFloat(e.target.value))}
+          style={{ position: 'absolute', inset: 0, width: '100%', opacity: 0, cursor: 'pointer', height: '100%' }}
+        />
+      </div>
+      <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 4, fontSize: '0.7rem', color: theme.textLight }}>
+        <span>{format(min)}</span><span>{format(max)}</span>
+      </div>
+    </div>
+  )
+}
+
+function ItemRow({ product, override, onChange }: {
+  product: typeof PRODUCTS[number]
+  override: ItemOverride
+  onChange: (o: ItemOverride) => void
+}) {
+  const effectivePrice = override.newPrice * (1 - override.discount)
+  const priceChanged = Math.abs(override.newPrice - product.price) > 0.001
+  const hasDiscount = override.discount > 0
+  const anyChange = priceChanged || hasDiscount || override.removed
+
+  return (
+    <div style={{
+      borderRadius: 16, padding: '12px 14px', marginBottom: 8,
+      background: override.removed ? theme.roseLight : anyChange ? `${theme.gold}18` : theme.cream,
+      border: `2px solid ${override.removed ? theme.rose : anyChange ? theme.gold : theme.border}`,
+      opacity: override.removed ? 0.65 : 1,
+      transition: 'all 0.2s',
+    }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: !override.removed ? 10 : 0 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <span style={{ fontSize: '1.2rem' }}>{product.emoji}</span>
           <div>
-            <h1 className="text-3xl font-bold text-white">☕ {businessName}</h1>
-            <p className="text-slate-400 mt-1">
-              Digital Twin Simulator
-              {csvResult && (
-                <span className="ml-2 text-xs text-blue-400 bg-blue-500/10 border border-blue-500/20 rounded-full px-2 py-0.5">
-                  📂 {csvResult.rows_loaded} rows loaded
-                </span>
+            <p style={{ fontWeight: 800, fontSize: '0.88rem', color: override.removed ? theme.textLight : theme.text, textDecoration: override.removed ? 'line-through' : 'none' }}>
+              {product.name}
+            </p>
+            <p style={{ fontSize: '0.72rem', color: theme.textLight, fontWeight: 600 }}>
+              Base ${product.price.toFixed(2)}
+              {(priceChanged || hasDiscount) && !override.removed && (
+                <span style={{ color: theme.brownLight, marginLeft: 6 }}>→ ${effectivePrice.toFixed(2)} effective</span>
               )}
             </p>
           </div>
-          <div className="flex gap-3">
-            <button
-              onClick={() => setStep('upload')}
-              className="text-slate-400 hover:text-white transition text-sm cursor-pointer"
-            >
-              ← Change Data
+        </div>
+        <div style={{ display: 'flex', gap: 6 }}>
+          {anyChange && !override.removed && (
+            <button onClick={() => onChange({ newPrice: product.price, discount: 0, removed: false })}
+              style={{ fontSize: '0.7rem', color: theme.textLight, background: theme.creamDark, border: `1.5px solid ${theme.border}`, borderRadius: 8, padding: '3px 8px', cursor: 'pointer', fontFamily: "'Nunito', sans-serif", fontWeight: 700 }}>
+              Reset
             </button>
-            <button
-              onClick={() => navigate('/')}
-              className="text-slate-400 hover:text-white transition text-sm cursor-pointer"
-            >
-              Home
-            </button>
+          )}
+          <button onClick={() => onChange({ ...override, removed: !override.removed })}
+            style={{ fontSize: '0.72rem', fontWeight: 800, borderRadius: 10, padding: '4px 10px', cursor: 'pointer', fontFamily: "'Nunito', sans-serif", border: 'none', background: override.removed ? theme.rose : theme.roseLight, color: override.removed ? '#fff' : '#c0392b', transition: 'all 0.15s' }}>
+            {override.removed ? '↩ Restore' : '✕ Remove'}
+          </button>
+        </div>
+      </div>
+
+      {!override.removed && (
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 }}>
+          <div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 5 }}>
+              <span style={{ fontSize: '0.72rem', fontWeight: 700, color: theme.textMuted }}>💰 New Price</span>
+              <span style={{ fontSize: '0.72rem', fontWeight: 800, color: priceChanged ? theme.brownLight : theme.textLight }}>
+                ${override.newPrice.toFixed(2)}
+                {priceChanged && <span style={{ marginLeft: 4, color: override.newPrice > product.price ? '#e74c3c' : theme.matchaDark }}>
+                  ({override.newPrice > product.price ? '+' : ''}{(((override.newPrice - product.price) / product.price) * 100).toFixed(0)}%)
+                </span>}
+              </span>
+            </div>
+            <div style={{ position: 'relative', height: 6, borderRadius: 6, background: theme.border }}>
+              <div style={{ position: 'absolute', left: 0, top: 0, height: '100%', borderRadius: 6, background: priceChanged ? theme.brownLight : theme.creamDark, width: `${((override.newPrice - 1) / (15 - 1)) * 100}%`, transition: 'width 0.1s' }} />
+              <input type="range" min={1} max={15} step={0.25} value={override.newPrice}
+                onChange={e => onChange({ ...override, newPrice: parseFloat(e.target.value) })}
+                style={{ position: 'absolute', inset: 0, width: '100%', opacity: 0, cursor: 'pointer', height: '100%' }}
+              />
+            </div>
+          </div>
+          <div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 5 }}>
+              <span style={{ fontSize: '0.72rem', fontWeight: 700, color: theme.textMuted }}>🏷️ Discount</span>
+              <span style={{ fontSize: '0.72rem', fontWeight: 800, color: hasDiscount ? theme.rose : theme.textLight }}>
+                {hasDiscount ? `${(override.discount * 100).toFixed(0)}% off` : 'None'}
+              </span>
+            </div>
+            <div style={{ position: 'relative', height: 6, borderRadius: 6, background: theme.border }}>
+              <div style={{ position: 'absolute', left: 0, top: 0, height: '100%', borderRadius: 6, background: hasDiscount ? theme.rose : theme.creamDark, width: `${(override.discount / 0.5) * 100}%`, transition: 'width 0.1s' }} />
+              <input type="range" min={0} max={0.5} step={0.05} value={override.discount}
+                onChange={e => onChange({ ...override, discount: parseFloat(e.target.value) })}
+                style={{ position: 'absolute', inset: 0, width: '100%', opacity: 0, cursor: 'pointer', height: '100%' }}
+              />
+            </div>
           </div>
         </div>
+      )}
+    </div>
+  )
+}
 
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          {/* LEFT COLUMN */}
-          <div className="rounded-2xl border border-slate-700 bg-slate-800/60 p-6 flex flex-col gap-5">
+export default function Simulator() {
+  const navigate = useNavigate()
+  const [tab, setTab] = useState<'ai' | 'form'>('ai')
+  const [formTab, setFormTab] = useState<'global' | 'items'>('global')
+  const [catFilter, setCatFilter] = useState('all')
+  const [aiInput, setAiInput] = useState('')
+  const [apiKey, setApiKey] = useState(localStorage.getItem('oai_key') ?? '')
+  const [showKey, setShowKey] = useState(false)
+  const [form, setForm] = useState<Form>(DEF)
+  const [itemOverrides, setItemOverrides] = useState<ItemOverrides>(() =>
+    Object.fromEntries(PRODUCTS.map(p => [p.name, { newPrice: p.price, discount: 0, removed: false }]))
+  )
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [progress, setProgress] = useState(0)
+  const [progressLabel, setProgressLabel] = useState('')
+  const [messages, setMessages] = useState<{ role: 'user' | 'ai'; text: string }[]>([])
 
-            {/* Current State */}
-            <div>
-              <div className="flex items-center justify-between mb-3">
-                <h2 className="text-base font-semibold text-white">Current State</h2>
-                {csvResult && (
-                  <span className="text-xs text-blue-400 bg-blue-500/10 border border-blue-500/20 rounded-full px-2 py-0.5">From CSV</span>
-                )}
-              </div>
+  const fmtH = (v: number) => { const h = Math.floor(v); const m = v % 1 === 0.5 ? '30' : '00'; return `${h > 12 ? h - 12 : h}:${m}${h >= 12 ? 'pm' : 'am'}` }
 
-              {csvResult ? (
-                <div className="grid grid-cols-2 gap-2">
-                  {([
-                    { label: 'Price',        value: `$${price.toFixed(2)}` },
-                    { label: 'Staff',        value: `${staff}` },
-                    { label: 'Cust / hr',   value: `${customersPerHour}` },
-                    { label: 'Open hrs',    value: `${operatingHours.toFixed(1)}h` },
-                  ]).map(({ label, value }) => (
-                    <div key={label} className="rounded-xl bg-slate-700/50 border border-slate-700 px-3 py-3">
-                      <p className="text-xs text-slate-500 mb-0.5">{label}</p>
-                      <p className="text-white font-bold text-lg font-mono">{value}</p>
-                    </div>
-                  ))}
-                </div>
-              ) : (
-                <div className="space-y-4">
-                  {([
-                    { label: 'Price',             val: `$${price.toFixed(2)}`,  input: <input type="range" min={2}  max={10} step={0.25} value={price}           onChange={(e) => setPrice(parseFloat(e.target.value))}           className="w-full accent-blue-500" /> },
-                    { label: 'Staff Count',        val: `${staff}`,              input: <input type="range" min={1}  max={8}  step={1}    value={staff}           onChange={(e) => setStaff(parseInt(e.target.value))}             className="w-full accent-blue-500" /> },
-                    { label: 'Customers / Hour',   val: `${customersPerHour}`,   input: <input type="range" min={5}  max={40} step={1}    value={customersPerHour}onChange={(e) => setCustomersPerHour(parseInt(e.target.value))}  className="w-full accent-blue-500" /> },
-                    { label: 'Opening Hours / Day',val: `${operatingHours}h`,    input: <input type="range" min={1}  max={16} step={0.5}  value={operatingHours}  onChange={(e) => setOperatingHours(parseFloat(e.target.value))}  className="w-full accent-blue-500" /> },
-                  ]).map(({ label, val, input }) => (
-                    <div key={label}>
-                      <div className="flex justify-between text-sm mb-1.5">
-                        <span className="text-slate-400">{label}</span>
-                        <span className="text-white font-mono">{val}</span>
-                      </div>
-                      {input}
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
+  const changedItemCount = Object.entries(itemOverrides).filter(([name, o]) => {
+    const base = PRODUCTS.find(p => p.name === name)!
+    return o.removed || o.discount > 0 || Math.abs(o.newPrice - base.price) > 0.001
+  }).length
 
-            <hr className="border-slate-700" />
+  const animProgress = (labels: string[]) => {
+    setProgress(0)
+    labels.forEach((lbl, i) => setTimeout(() => { setProgress(Math.round(((i + 1) / labels.length) * 88)); setProgressLabel(lbl) }, i * 420))
+  }
 
-            {/* What-If Scenario */}
-            <div>
-              <h2 className="text-base font-semibold text-white mb-3">What-If Scenario</h2>
-              <div className="space-y-4">
+  const buildScenario = useCallback((base: Form): ScenarioRequest => {
+    const overrides: ScenarioRequest['product_overrides'] = []
+    const removeList: string[] = []
+    for (const [name, o] of Object.entries(itemOverrides)) {
+      const baseProduct = PRODUCTS.find(p => p.name === name)!
+      if (o.removed) { removeList.push(name); continue }
+      const priceChanged = Math.abs(o.newPrice - baseProduct.price) > 0.001
+      const hasDiscount = o.discount > 0
+      if (priceChanged || hasDiscount) overrides.push({ name, ...(priceChanged ? { price: o.newPrice } : {}), ...(hasDiscount ? { discount: o.discount } : {}) })
+    }
+    return {
+      n_staff: base.n_staff, open_hour: base.open_hour, close_hour: base.close_hour,
+      day_of_week: base.day_of_week, description: 'Custom scenario',
+      special_multiplier: base.special_multiplier !== 1 ? base.special_multiplier : undefined,
+      price_change_factor: base.price_change_factor !== 1 ? base.price_change_factor : undefined,
+      apply_discount_to_all: base.apply_discount_to_all > 0 ? base.apply_discount_to_all : undefined,
+      apply_discount_to_cold: base.apply_discount_to_cold > 0 ? base.apply_discount_to_cold : undefined,
+      remove_products: removeList.length > 0 ? removeList : undefined,
+      product_overrides: overrides.length > 0 ? overrides : undefined,
+      n_simulations: base.n_simulations,
+    }
+  }, [itemOverrides])
 
-                {/* Price */}
-                <div>
-                  <div className="flex items-center justify-between mb-1.5">
-                    <span className="text-sm text-slate-400">Price</span>
-                    <div className="flex items-center gap-2">
-                      {newPrice !== price && (
-                        <span className={`text-xs font-medium px-1.5 py-0.5 rounded-md ${
-                          newPrice > price ? 'text-green-400 bg-green-400/10' : 'text-red-400 bg-red-400/10'
-                        }`}>{newPrice > price ? '+' : ''}{(newPrice - price).toFixed(2)}</span>
-                      )}
-                      <span className="text-cyan-400 font-mono text-sm">${newPrice.toFixed(2)}</span>
-                    </div>
-                  </div>
-                  <input type="range" min={2} max={10} step={0.25} value={newPrice}
-                    onChange={(e) => setNewPrice(parseFloat(e.target.value))}
-                    className="w-full accent-cyan-500" />
-                </div>
+  const runScenario = useCallback(async (scenario: ScenarioRequest, desc: string) => {
+    setLoading(true); setError(null)
+    animProgress(['Generating arrivals ☕', 'Simulating the queue 🧑‍🍳', 'Crunching days 📊', 'Compiling results ✨'])
+    try {
+      const result: CompareResponse = await runCompare({ scenarios: { scenario }, n_simulations: scenario.n_simulations ?? 200 })
+      setProgress(100)
+      setTimeout(() => { sessionStorage.setItem('cafeResults', JSON.stringify({ result, description: desc })); navigate('/results') }, 350)
+    } catch (e: any) {
+      setError(e.message ?? 'Simulation failed. Is the backend running?'); setLoading(false); setProgress(0)
+    }
+  }, [navigate])
 
-                {/* Staff */}
-                <div>
-                  <div className="flex items-center justify-between mb-1.5">
-                    <span className="text-sm text-slate-400">Staff Count</span>
-                    <div className="flex items-center gap-2">
-                      {newStaff !== staff && (
-                        <span className={`text-xs font-medium px-1.5 py-0.5 rounded-md ${
-                          newStaff > staff ? 'text-green-400 bg-green-400/10' : 'text-red-400 bg-red-400/10'
-                        }`}>{newStaff > staff ? '+' : ''}{newStaff - staff}</span>
-                      )}
-                      <span className="text-cyan-400 font-mono text-sm">{newStaff}</span>
-                    </div>
-                  </div>
-                  <input type="range" min={1} max={8} step={1} value={newStaff}
-                    onChange={(e) => setNewStaff(parseInt(e.target.value))}
-                    className="w-full accent-cyan-500" />
-                </div>
+  const handleAI = useCallback(async (text: string) => {
+    if (!text.trim()) return
+    if (!apiKey.trim()) { setShowKey(true); return }
+    setMessages(p => [...p, { role: 'user', text }]); setAiInput(''); setLoading(true); setError(null)
+    setProgressLabel('Asking GPT-4o-mini 🤖'); setProgress(15)
+    try {
+      const parsed = await parseHypothesisWithGPT(text, apiKey)
+      setProgress(40)
+      setMessages(p => [...p, { role: 'ai', text: `${parsed.description}\n\n💡 ${parsed.reasoning}` }])
+      await runScenario({ ...parsed.scenario, description: parsed.description }, parsed.description)
+    } catch (e: any) {
+      setError(e.message); setMessages(p => [...p, { role: 'ai', text: `😵 ${e.message}` }]); setLoading(false); setProgress(0)
+    }
+  }, [apiKey, runScenario])
 
-                {/* Opening hours */}
-                <div>
-                  <div className="flex items-center justify-between mb-1.5">
-                    <span className="text-sm text-slate-400">Opening Hours / Day</span>
-                    <div className="flex items-center gap-2">
-                      {newOperatingHours !== operatingHours && (
-                        <span className={`text-xs font-medium px-1.5 py-0.5 rounded-md ${
-                          newOperatingHours > operatingHours ? 'text-green-400 bg-green-400/10' : 'text-red-400 bg-red-400/10'
-                        }`}>{newOperatingHours > operatingHours ? '+' : ''}{(newOperatingHours - operatingHours).toFixed(1)}h</span>
-                      )}
-                      <span className="text-cyan-400 font-mono text-sm">{newOperatingHours}h</span>
-                    </div>
-                  </div>
-                  <input type="range" min={1} max={16} step={0.5} value={newOperatingHours}
-                    onChange={(e) => setNewOperatingHours(parseFloat(e.target.value))}
-                    className="w-full accent-cyan-500" />
-                </div>
+  const sf = (k: keyof Form) => (v: number) => setForm(p => ({ ...p, [k]: v }))
+  const filteredProducts = catFilter === 'all' ? PRODUCTS : PRODUCTS.filter(p => p.category === catFilter)
 
-              </div>
-            </div>
+  return (
+    <main style={{ minHeight: '100vh', background: `linear-gradient(150deg, ${theme.cream} 0%, #fef3e8 60%, ${theme.matchaLight}33 100%)`, fontFamily: "'Nunito', system-ui, sans-serif", padding: '32px 24px' }}>
+      <div style={{ maxWidth: 1100, margin: '0 auto' }}>
 
-            {/* Run button */}
-            <button onClick={handleRunSimulation} disabled={loading}
-              className="w-full rounded-xl bg-blue-600 hover:bg-blue-500 disabled:bg-slate-600 px-6 py-3.5 text-white font-semibold transition cursor-pointer disabled:cursor-not-allowed">
-              {loading ? 'Running...' : 'Run Simulation →'}
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 32 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+            <button onClick={() => navigate('/')} style={{ background: 'none', border: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 8 }}>
+              <CoffeeCup size={36} />
+              <span style={{ fontFamily: "'Pacifico', cursive", fontSize: '1.2rem', color: theme.brown }}>Brewlytics</span>
             </button>
-
-            {loading && (
-              <div className="-mt-2">
-                <div className="h-1.5 rounded-full bg-slate-700 overflow-hidden">
-                  <div className="h-full bg-blue-500 transition-all duration-300 ease-out rounded-full" style={{ width: `${progress}%` }} />
-                </div>
-                <p className="text-xs text-slate-500 mt-1 text-center">{progress}% — simulating 500 days</p>
-              </div>
-            )}
-
-            {error && <p className="text-sm text-red-400 bg-red-400/10 rounded-lg p-3">{error}</p>}
+            <span style={{ background: theme.creamDark, color: theme.textMuted, borderRadius: 12, padding: '4px 12px', fontSize: '0.78rem', fontWeight: 700 }}>🧪 Hypothesis Lab</span>
           </div>
+          <button onClick={() => setShowKey(v => !v)} style={{ background: apiKey ? theme.matchaLight : theme.goldLight, color: apiKey ? theme.matchaDark : '#996600', border: `2px solid ${apiKey ? theme.matcha : theme.gold}`, borderRadius: 50, padding: '7px 16px', fontSize: '0.8rem', fontWeight: 800, cursor: 'pointer', fontFamily: "'Nunito', sans-serif" }}>
+            {apiKey ? '🔑 OpenAI ✓' : '⚠️ Set OpenAI Key'}
+          </button>
+        </div>
 
-          {/* MIDDLE + RIGHT: AI Chat */}
-          <div className="lg:col-span-2 rounded-2xl border border-slate-700 bg-slate-800/60 p-6 flex flex-col">
-            <h2 className="text-lg font-semibold text-white mb-4">💬 AI Business Advisor</h2>
+        {showKey && (
+          <div style={{ background: theme.goldLight, border: `2px solid ${theme.gold}`, borderRadius: 20, padding: '16px 20px', marginBottom: 20, display: 'flex', gap: 12, alignItems: 'center' }}>
+            <span style={{ fontSize: '0.9rem', fontWeight: 700, color: '#996600' }}>🔑 OpenAI API Key</span>
+            <input type="password" placeholder="sk-..." value={apiKey} onChange={e => setApiKey(e.target.value)}
+              style={{ flex: 1, borderRadius: 12, border: `2px solid ${theme.gold}`, padding: '8px 14px', fontSize: '0.9rem', background: theme.white, color: theme.text, fontFamily: "'Nunito', sans-serif", outline: 'none' }} />
+            <button onClick={() => { localStorage.setItem('oai_key', apiKey); setShowKey(false) }}
+              style={{ background: theme.brown, color: '#fff', border: 'none', borderRadius: 12, padding: '8px 20px', fontWeight: 800, cursor: 'pointer', fontFamily: "'Nunito', sans-serif" }}>Save</button>
+          </div>
+        )}
 
-            <div className="flex-1 min-h-75 max-h-125 overflow-y-auto space-y-3 mb-4 pr-1">
-              {chatMessages.length === 0 && (
-                <div className="text-center py-16">
-                  <p className="text-4xl mb-3">🤖</p>
-                  <p className="text-slate-500">Ask me anything about your business decisions.</p>
-                  <div className="mt-4 flex flex-wrap justify-center gap-2">
-                    {[
-                      "What if I raise prices to $5.50?",
-                      "Should I hire another barista?",
-                      "What if I add 2 more staff?",
-                    ].map((suggestion) => (
-                      <button key={suggestion} onClick={() => setChatInput(suggestion)}
-                        className="rounded-full border border-slate-600 bg-slate-700/50 px-3 py-1.5 text-xs text-slate-300 hover:border-blue-500 hover:text-blue-400 transition cursor-pointer">
-                        {suggestion}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              )}
+        <div style={{ display: 'grid', gridTemplateColumns: '400px 1fr', gap: 20 }}>
 
-              {chatMessages.map((msg, i) => (
-                <div key={i} className={`rounded-xl p-4 max-w-[85%] ${
-                  msg.role === 'user'
-                    ? 'ml-auto bg-blue-600/20 border border-blue-500/30 text-blue-100'
-                    : 'mr-auto bg-slate-700/50 border border-slate-600 text-slate-200'
-                }`}>
-                  <p className="text-xs font-semibold mb-1 opacity-60">{msg.role === 'user' ? 'You' : '🤖 AI Advisor'}</p>
-                  <p className="text-sm whitespace-pre-wrap">{msg.text}</p>
-                </div>
+          {/* LEFT PANEL */}
+          <div style={{ background: theme.white, borderRadius: 28, padding: 24, border: `2px solid ${theme.border}`, boxShadow: '0 4px 20px rgba(139,94,60,0.08)', display: 'flex', flexDirection: 'column' }}>
+
+            {/* Main tab switcher */}
+            <div style={{ display: 'flex', background: theme.creamDark, borderRadius: 16, padding: 4, gap: 4, marginBottom: 20 }}>
+              {[{ id: 'ai', label: '💬 AI Chat' }, { id: 'form', label: '🎛️ Controls' }].map(t => (
+                <button key={t.id} onClick={() => setTab(t.id as any)}
+                  style={{ flex: 1, borderRadius: 12, padding: '8px', fontSize: '0.85rem', fontWeight: 800, border: 'none', cursor: 'pointer', fontFamily: "'Nunito', sans-serif", transition: 'all 0.2s', background: tab === t.id ? `linear-gradient(135deg, ${theme.brown}, ${theme.brownLight})` : 'transparent', color: tab === t.id ? '#fff' : theme.textMuted }}
+                >{t.label}</button>
               ))}
             </div>
 
-            <div className="flex gap-2">
-              <input type="text" value={chatInput}
-                onChange={(e) => setChatInput(e.target.value)}
-                onKeyDown={(e) => e.key === 'Enter' && !e.shiftKey && handleChat()}
-                placeholder='Try: "What if I raise my prices to $5.50?"'
-                className="flex-1 rounded-xl border border-slate-600 bg-slate-700/50 px-4 py-3 text-white placeholder-slate-500 outline-none focus:ring-2 ring-blue-500/50 transition" />
-              <button onClick={handleChat} disabled={loading || !chatInput.trim()}
-                className="rounded-xl bg-blue-600 hover:bg-blue-500 disabled:bg-slate-600 px-6 py-3 text-white font-semibold transition cursor-pointer disabled:cursor-not-allowed">
-                Send
-              </button>
-            </div>
+            {/* AI TAB */}
+            {tab === 'ai' && (
+              <div style={{ display: 'flex', flexDirection: 'column', flex: 1 }}>
+                <p style={{ fontSize: '0.82rem', color: theme.textMuted, marginBottom: 16, fontWeight: 600, lineHeight: 1.5 }}>
+                  Describe any scenario in plain English — GPT-4o-mini configures it ✨
+                </p>
+                <div style={{ maxHeight: 220, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 10, marginBottom: 16 }}>
+                  {messages.length === 0 && (
+                    <div style={{ textAlign: 'center', padding: '24px 0', color: theme.textLight }}>
+                      <div style={{ fontSize: '2.5rem', marginBottom: 8 }}>🤖☕</div>
+                      <p style={{ fontSize: '0.82rem', fontWeight: 600 }}>Type a scenario or pick a suggestion!</p>
+                    </div>
+                  )}
+                  {messages.map((m, i) => (
+                    <div key={i} style={{ borderRadius: 16, padding: '10px 14px', fontSize: '0.83rem', lineHeight: 1.5, background: m.role === 'user' ? `${theme.brownLight}22` : theme.creamDark, border: `1.5px solid ${m.role === 'user' ? theme.brownLight : theme.border}`, alignSelf: m.role === 'user' ? 'flex-end' : 'flex-start', maxWidth: '88%', color: theme.text, fontWeight: 600 }}>
+                      <p style={{ fontSize: '0.7rem', fontWeight: 800, opacity: 0.6, marginBottom: 4 }}>{m.role === 'user' ? '🧑 You' : '🤖 GPT-4o-mini'}</p>
+                      <p style={{ whiteSpace: 'pre-wrap' }}>{m.text}</p>
+                    </div>
+                  ))}
+                </div>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 14 }}>
+                  {QUICK_CHIPS.map(c => (
+                    <button key={c.text} onClick={() => setAiInput(c.text)}
+                      style={{ background: theme.creamDark, color: theme.textMuted, border: `1.5px solid ${theme.border}`, borderRadius: 50, padding: '5px 12px', fontSize: '0.75rem', fontWeight: 700, cursor: 'pointer', fontFamily: "'Nunito', sans-serif" }}
+                      onMouseEnter={e => { (e.currentTarget as any).style.borderColor = theme.brownLight; (e.currentTarget as any).style.color = theme.brown }}
+                      onMouseLeave={e => { (e.currentTarget as any).style.borderColor = theme.border; (e.currentTarget as any).style.color = theme.textMuted }}
+                    >{c.emoji} {c.text}</button>
+                  ))}
+                </div>
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <input value={aiInput} onChange={e => setAiInput(e.target.value)}
+                    onKeyDown={e => e.key === 'Enter' && !e.shiftKey && handleAI(aiInput)}
+                    placeholder="e.g. 15% off lattes on Fridays?"
+                    style={{ flex: 1, borderRadius: 16, border: `2px solid ${theme.border}`, padding: '10px 14px', fontSize: '0.85rem', background: theme.cream, color: theme.text, fontFamily: "'Nunito', sans-serif", outline: 'none', fontWeight: 600 }}
+                    onFocus={e => (e.currentTarget.style.borderColor = theme.brownLight)}
+                    onBlur={e => (e.currentTarget.style.borderColor = theme.border)}
+                  />
+                  <button onClick={() => handleAI(aiInput)} disabled={loading || !aiInput.trim()}
+                    style={{ background: loading || !aiInput.trim() ? theme.border : `linear-gradient(135deg, ${theme.brown}, ${theme.brownLight})`, color: loading || !aiInput.trim() ? theme.textLight : '#fff', border: 'none', borderRadius: 16, padding: '10px 18px', fontSize: '1.1rem', cursor: loading || !aiInput.trim() ? 'not-allowed' : 'pointer' }}
+                  >☕</button>
+                </div>
+              </div>
+            )}
 
-            {chatMessages.some((m) => m.role === 'ai') && (
-              <button onClick={() => navigate('/results')}
-                className="mt-4 w-full rounded-xl border border-cyan-500/30 bg-cyan-500/10 hover:bg-cyan-500/20 px-6 py-3 text-cyan-400 font-semibold transition cursor-pointer">
-                📊 View Full Results Dashboard →
-              </button>
+            {/* FORM TAB */}
+            {tab === 'form' && (
+              <div style={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 }}>
+                {/* Sub-tabs */}
+                <div style={{ display: 'flex', gap: 8, marginBottom: 18 }}>
+                  <button onClick={() => setFormTab('global')}
+                    style={{ flex: 1, borderRadius: 12, padding: '9px 12px', fontSize: '0.82rem', fontWeight: 800, border: `2px solid ${formTab === 'global' ? theme.brown : theme.border}`, background: formTab === 'global' ? `${theme.brown}15` : theme.cream, color: formTab === 'global' ? theme.brown : theme.textMuted, cursor: 'pointer', fontFamily: "'Nunito', sans-serif", transition: 'all 0.15s' }}>
+                    ⚙️ Global
+                  </button>
+                  <button onClick={() => setFormTab('items')}
+                    style={{ flex: 1, borderRadius: 12, padding: '9px 12px', fontSize: '0.82rem', fontWeight: 800, border: `2px solid ${formTab === 'items' ? theme.brownLight : theme.border}`, background: formTab === 'items' ? `${theme.brownLight}15` : theme.cream, color: formTab === 'items' ? theme.brownLight : theme.textMuted, cursor: 'pointer', fontFamily: "'Nunito', sans-serif", transition: 'all 0.15s', position: 'relative' }}>
+                    ☕ Per Item
+                    {changedItemCount > 0 && (
+                      <span style={{ position: 'absolute', top: -7, right: -7, background: theme.rose, color: '#fff', borderRadius: 50, width: 19, height: 19, fontSize: '0.65rem', fontWeight: 900, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                        {changedItemCount}
+                      </span>
+                    )}
+                  </button>
+                </div>
+
+                {/* GLOBAL */}
+                {formTab === 'global' && (
+                  <div style={{ overflowY: 'auto', flex: 1, paddingRight: 4 }}>
+                    <KawaiiSlider label="Staff on Shift" emoji="👥" value={form.n_staff} min={1} max={10} step={1} format={v => `${v} staff`} onChange={sf('n_staff')} accentColor={theme.brown} />
+                    <KawaiiSlider label="Opening Hour" emoji="🌅" value={form.open_hour} min={5} max={12} step={0.5} format={fmtH} onChange={sf('open_hour')} accentColor={theme.gold} />
+                    <KawaiiSlider label="Closing Hour" emoji="🌙" value={form.close_hour} min={14} max={23} step={0.5} format={fmtH} onChange={sf('close_hour')} accentColor={theme.lavender} />
+                    <KawaiiSlider label="Global Price Change" emoji="💰" value={form.price_change_factor} min={0.7} max={1.5} step={0.05}
+                      format={v => v === 1 ? 'No change' : `${v > 1 ? '+' : ''}${((v - 1) * 100).toFixed(0)}% all`}
+                      onChange={sf('price_change_factor')} accentColor={theme.brownLight} />
+                    <KawaiiSlider label="Discount — All Items" emoji="🏷️" value={form.apply_discount_to_all} min={0} max={0.5} step={0.05}
+                      format={v => v === 0 ? 'None' : `${(v * 100).toFixed(0)}% off`} onChange={sf('apply_discount_to_all')} accentColor={theme.rose} />
+                    <KawaiiSlider label="Discount — Cold Only" emoji="❄️" value={form.apply_discount_to_cold} min={0} max={0.5} step={0.05}
+                      format={v => v === 0 ? 'None' : `${(v * 100).toFixed(0)}% off`} onChange={sf('apply_discount_to_cold')} accentColor='#60a5fa' />
+                    <KawaiiSlider label="Traffic Multiplier" emoji="🎪" value={form.special_multiplier} min={0.5} max={8} step={0.5}
+                      format={v => v === 1 ? 'Normal' : `${v}× traffic`} onChange={sf('special_multiplier')} accentColor={theme.matcha} />
+                    <KawaiiSlider label="Simulations" emoji="🎲" value={form.n_simulations} min={50} max={1000} step={50}
+                      format={v => `${v} days`} onChange={sf('n_simulations')} accentColor={theme.brownDark} />
+                    <div style={{ marginBottom: 20 }}>
+                      <p style={{ fontWeight: 700, color: theme.text, fontSize: '0.9rem', marginBottom: 10 }}>📅 Day of Week</p>
+                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+                        {DAY_OPTS.map(d => (
+                          <button key={d.val} onClick={() => setForm(p => ({ ...p, day_of_week: d.val }))}
+                            style={{ borderRadius: 50, padding: '7px 14px', fontSize: '0.8rem', fontWeight: 700, border: `2px solid ${form.day_of_week === d.val ? d.color : theme.border}`, background: form.day_of_week === d.val ? d.color + '22' : theme.creamDark, color: form.day_of_week === d.val ? d.color : theme.textMuted, cursor: 'pointer', fontFamily: "'Nunito', sans-serif", transition: 'all 0.15s' }}
+                          >{d.label}</button>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* PER ITEM */}
+                {formTab === 'items' && (
+                  <div style={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
+                      <p style={{ fontSize: '0.8rem', color: theme.textMuted, fontWeight: 600 }}>
+                        Tweak price or discount per item ✏️
+                      </p>
+                      {changedItemCount > 0 && (
+                        <button onClick={() => setItemOverrides(Object.fromEntries(PRODUCTS.map(p => [p.name, { newPrice: p.price, discount: 0, removed: false }])))}
+                          style={{ fontSize: '0.72rem', color: theme.textLight, background: theme.creamDark, border: `1.5px solid ${theme.border}`, borderRadius: 8, padding: '4px 10px', cursor: 'pointer', fontFamily: "'Nunito', sans-serif", fontWeight: 700, whiteSpace: 'nowrap' }}>
+                          Reset All
+                        </button>
+                      )}
+                    </div>
+                    {/* Category pills */}
+                    <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap', marginBottom: 12 }}>
+                      {CATEGORIES.map(c => (
+                        <button key={c.id} onClick={() => setCatFilter(c.id)}
+                          style={{ borderRadius: 50, padding: '4px 11px', fontSize: '0.73rem', fontWeight: 700, border: `1.5px solid ${catFilter === c.id ? theme.brownLight : theme.border}`, background: catFilter === c.id ? `${theme.brownLight}22` : theme.cream, color: catFilter === c.id ? theme.brownLight : theme.textMuted, cursor: 'pointer', fontFamily: "'Nunito', sans-serif", transition: 'all 0.15s' }}>
+                          {c.label}
+                        </button>
+                      ))}
+                    </div>
+                    <div style={{ overflowY: 'auto', flex: 1 }}>
+                      {filteredProducts.map(p => (
+                        <ItemRow key={p.name} product={p} override={itemOverrides[p.name]}
+                          onChange={o => setItemOverrides(prev => ({ ...prev, [p.name]: o }))}
+                        />
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                <button onClick={() => runScenario(buildScenario(form), 'Custom scenario')} disabled={loading}
+                  style={{ marginTop: 16, width: '100%', background: loading ? theme.border : `linear-gradient(135deg, ${theme.brown}, ${theme.brownLight})`, color: loading ? theme.textLight : '#fff', border: 'none', borderRadius: 50, padding: '14px', fontSize: '1rem', fontWeight: 800, cursor: loading ? 'not-allowed' : 'pointer', fontFamily: "'Nunito', sans-serif", boxShadow: loading ? 'none' : `0 6px 20px ${theme.brownLight}55`, flexShrink: 0 }}>
+                  ☕ Run Simulation{changedItemCount > 0 ? ` · ${changedItemCount} item${changedItemCount > 1 ? 's' : ''} modified` : ''}
+                </button>
+              </div>
+            )}
+          </div>
+
+          {/* RIGHT PANEL */}
+          <div>
+            {loading ? (
+              <div style={{ background: theme.white, borderRadius: 28, padding: 48, border: `2px solid ${theme.border}`, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', minHeight: 420, gap: 24 }}>
+                <div style={{ animation: 'float 1.5s ease-in-out infinite', position: 'relative' }}>
+                  <CoffeeCup size={100} />
+                  <div style={{ position: 'absolute', top: -8, right: -8, fontSize: '1.5rem', animation: 'spin 2s linear infinite' }}>✨</div>
+                </div>
+                <div style={{ textAlign: 'center' }}>
+                  <p style={{ fontFamily: "'Pacifico', cursive", fontSize: '1.4rem', color: theme.brownDark, marginBottom: 8 }}>Brewing your results...</p>
+                  <p style={{ color: theme.textMuted, fontSize: '0.9rem', fontWeight: 600 }}>{progressLabel}</p>
+                </div>
+                <div style={{ width: 280, height: 12, borderRadius: 12, background: theme.creamDark, overflow: 'hidden' }}>
+                  <div style={{ height: '100%', borderRadius: 12, background: `linear-gradient(90deg, ${theme.brown}, ${theme.brownLight}, ${theme.matcha})`, width: `${progress}%`, transition: 'width 0.4s ease' }} />
+                </div>
+                <p style={{ color: theme.textLight, fontSize: '0.8rem', fontWeight: 700 }}>{progress}% complete ☕</p>
+              </div>
+            ) : error ? (
+              <div style={{ background: theme.roseLight, borderRadius: 28, padding: 40, border: `2px solid ${theme.rose}`, textAlign: 'center', minHeight: 300, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 16 }}>
+                <div style={{ fontSize: '3rem' }}>😵‍💫</div>
+                <p style={{ fontWeight: 800, color: '#c0392b' }}>Oops! Something went wrong</p>
+                <p style={{ color: '#e74c3c', fontSize: '0.85rem', maxWidth: 320, lineHeight: 1.6 }}>{error}</p>
+                <button onClick={() => setError(null)} style={{ background: theme.rose, color: '#fff', border: 'none', borderRadius: 50, padding: '10px 24px', fontWeight: 800, cursor: 'pointer', fontFamily: "'Nunito', sans-serif" }}>Try Again 💪</button>
+              </div>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+                <div style={{ background: `linear-gradient(135deg, ${theme.brownDark}, ${theme.brown})`, borderRadius: 28, padding: 32, color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 24 }}>
+                  <div>
+                    <p style={{ fontSize: '0.8rem', opacity: 0.7, fontWeight: 700, letterSpacing: '0.1em', marginBottom: 8 }}>READY TO SIMULATE</p>
+                    <p style={{ fontFamily: "'Pacifico', cursive", fontSize: '1.6rem', marginBottom: 8 }}>Café Hypothesis Lab</p>
+                    <p style={{ opacity: 0.7, fontSize: '0.88rem', lineHeight: 1.6 }}>Adjust global settings and per-item prices,<br />then run to see full Δ metrics vs baseline.</p>
+                    {changedItemCount > 0 && (
+                      <div style={{ marginTop: 12, display: 'inline-flex', alignItems: 'center', gap: 6, background: 'rgba(255,255,255,0.15)', borderRadius: 50, padding: '5px 14px' }}>
+                        <span style={{ fontSize: '0.82rem', fontWeight: 800 }}>🏷️ {changedItemCount} item{changedItemCount > 1 ? 's' : ''} modified</span>
+                      </div>
+                    )}
+                  </div>
+                  <div style={{ animation: 'float 3s ease-in-out infinite', flexShrink: 0 }}><MatchaLatte size={90} /></div>
+                </div>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 12 }}>
+                  {[
+                    { label: 'Baseline Revenue', val: '$1,430/day', color: theme.brown, bg: theme.creamDark },
+                    { label: 'Baseline Profit', val: '$396/day', color: theme.matchaDark, bg: theme.matchaLight },
+                    { label: 'Customers/Day', val: '~132', color: '#7c3aed', bg: theme.lavenderLight },
+                    { label: 'Avg Wait', val: '0.31 min', color: '#d97706', bg: theme.goldLight },
+                    { label: 'Gross Margin', val: '79.4%', color: theme.brown, bg: theme.creamDark },
+                    { label: 'Staff Util.', val: '31.9%', color: '#0284c7', bg: '#e0f2fe' },
+                  ].map(m => (
+                    <div key={m.label} style={{ background: m.bg, borderRadius: 18, padding: '14px 16px', border: `2px solid ${m.color}22` }}>
+                      <p style={{ fontSize: '0.7rem', color: theme.textMuted, fontWeight: 700, marginBottom: 4 }}>{m.label}</p>
+                      <p style={{ fontFamily: "'Pacifico', cursive", fontSize: '1rem', color: m.color }}>{m.val}</p>
+                    </div>
+                  ))}
+                </div>
+                <div style={{ background: theme.white, borderRadius: 24, padding: '16px 20px', border: `2px solid ${theme.border}`, display: 'flex', gap: 12, alignItems: 'center' }}>
+                  <span style={{ fontSize: '1.5rem' }}>💡</span>
+                  <p style={{ color: theme.textMuted, fontSize: '0.83rem', lineHeight: 1.5, fontWeight: 600 }}>
+                    Use <strong style={{ color: theme.brown }}>Global</strong> for staff, hours & bulk pricing — or <strong style={{ color: theme.brownLight }}>Per Item</strong> to set individual drink/food prices and discounts.
+                  </p>
+                </div>
+              </div>
             )}
           </div>
         </div>
       </div>
+
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=Pacifico&family=Nunito:wght@400;600;700;800;900&display=swap');
+        @keyframes float { 0%,100%{transform:translateY(0)} 50%{transform:translateY(-8px)} }
+        @keyframes spin { to{transform:rotate(360deg)} }
+      `}</style>
     </main>
   )
 }
-
-export default Simulator

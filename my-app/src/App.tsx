@@ -1,15 +1,17 @@
+import { BrowserRouter, Routes, Route } from 'react-router-dom'
 import Landing from './pages/Landing'
-import Simulation from './pages/Simulator'
+import Upload from './pages/Upload'
+import Simulator from './pages/Simulator'
 import Results from './pages/Results'
-import {BrowserRouter, Routes, Route} from 'react-router-dom'
-
 
 function App() {
   return (
     <BrowserRouter>
       <Routes>
         <Route path="/" element={<Landing />} />
-        <Route path="/simulation" element={<Simulation />} />
+        <Route path="/upload" element={<Upload />} />
+        <Route path="/simulate" element={<Simulator />} />
+        <Route path="/simulation" element={<Simulator />} />
         <Route path="/results" element={<Results />} />
       </Routes>
     </BrowserRouter>
