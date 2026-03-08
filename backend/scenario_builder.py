@@ -58,4 +58,5 @@ def build_config(req: ScenarioRequest) -> CafeConfig:
         day_of_week=req.day_of_week if req.day_of_week is not None else default_cfg.DAY_OF_WEEK,
         daily_fixed_cost=req.daily_fixed_cost if req.daily_fixed_cost is not None else default_cfg.DAILY_FIXED_COST,
         special_multiplier=req.special_multiplier if req.special_multiplier is not None else 1.0,
+        price_change_pct=req.price_change_factor - 1.0 if req.price_change_factor is not None else 0.0,  # ADD THIS
     )

@@ -46,7 +46,7 @@ class ArrivalRateRV:
     def arrival_times(self, open_hour, close_hour, avg_discount=0.0,
                       avg_price_change=0.0, day_multiplier=1.0) -> np.ndarray:
         discount_lift = 1 + 0.8 * avg_discount
-        price_drag    = 1 - 0.5 * avg_price_change
+        price_drag    = 1 - 0.9 * avg_price_change
         multiplier    = day_multiplier * discount_lift * price_drag
         t_vals = np.linspace(open_hour, close_hour, 1000)
         lambda_max = max(self.base_rate(t) for t in t_vals) * multiplier
@@ -101,7 +101,7 @@ class PurchaseRV:
             if prod["is_hot"] == customer["hot_pref"]:
                 u += 0.4
             normalized_price = prod["price"] * (1 - prod.get("discount", 0))
-            u -= customer["price_sensitivity"] * (normalized_price / max(customer["avg_spending"], 1)) * 2
+            u -= customer["price_sensitivity"] * (normalized_price / max(customer["avg_spending"], 1)) * 4
             u += prod.get("discount", 0) * 1.5
             u -= 0.5 * (waiting_time / max(patience, 1))
             utilities[i] = u

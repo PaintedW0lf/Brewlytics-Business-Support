@@ -15,6 +15,7 @@ class CafeConfig:
     open_hour: float = 7.0
     day_of_week: str = "weekday"
     daily_fixed_cost: float = 200.0
+    price_change_pct: float = 0.0
 
     @property
     def close_hour(self) -> float:
@@ -69,6 +70,7 @@ def simulate_day(config: CafeConfig, seed: Optional[int] = None) -> DayResult:
         open_hour=config.open_hour,
         close_hour=config.close_hour,
         avg_discount=config.avg_discount,
+        avg_price_change=config.price_change_pct,
         day_multiplier=config.day_multiplier,
     )
     n_arrived = len(arrivals)
