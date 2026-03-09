@@ -4,6 +4,7 @@
 
 ![Python](https://img.shields.io/badge/Python-3.11+-blue) ![React](https://img.shields.io/badge/React-19-61DAFB) ![FastAPI](https://img.shields.io/badge/FastAPI-0.109-009688) ![NumPy](https://img.shields.io/badge/NumPy-1.26-013243)
 
+Video DEMO - https://vimeo.com/1171538171?share=copy&fl=sv&fe=ci
 ---
 
 # 📌 What Is This?
