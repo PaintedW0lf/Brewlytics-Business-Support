@@ -1,13 +1,15 @@
-# ☕ Brewlytics — Café Business Digital Twin
+# ☕ Brewlytics — Scabale Café Business Digital Twin
 
 > **Hackathon 2026** — Simulate pricing changes, staffing decisions, and growth scenarios *before* committing a single dollar.
 
 ![Python](https://img.shields.io/badge/Python-3.11+-blue) ![React](https://img.shields.io/badge/React-19-61DAFB) ![FastAPI](https://img.shields.io/badge/FastAPI-0.109-009688) ![NumPy](https://img.shields.io/badge/NumPy-1.26-013243)
 
-Video DEMO - https://vimeo.com/1171538171?share=copy&fl=sv&fe=ci
 ---
 
+<a href="https://vimeo.com/1171538171?share=copy&fl=sv&fe=ci" target="_blank" style="padding: 10px 20px; background-color: #00ADEF; color: white; text-decoration: none; border-radius: 5px; font-weight: bold;">▶️ Play Video Demo and see how this is a great solution</a>
+
 # 📌 What Is This?
+
 
 Brewlytics is a **Digital Twin simulation engine for cafés and small food businesses**.
 
